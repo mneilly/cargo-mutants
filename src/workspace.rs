@@ -112,6 +112,78 @@ impl Workspace {
         Ok(Workspace { metadata, packages })
     }
 
+    /// Cargo's package environment for direct execution of compiled test artifacts.
+    pub fn package_environment(
+        &self,
+    ) -> std::collections::BTreeMap<Utf8PathBuf, Vec<(String, String)>> {
+        self.metadata
+            .workspace_packages()
+            .into_iter()
+            .filter_map(|package| {
+                let relative_dir = package
+                    .manifest_path
+                    .parent()?
+                    .strip_prefix(self.root())
+                    .ok()?
+                    .to_owned();
+                let version = &package.version;
+                let values = [
+                    ("CARGO_PKG_NAME", package.name.to_string()),
+                    ("CARGO_PKG_VERSION", version.to_string()),
+                    ("CARGO_PKG_VERSION_MAJOR", version.major.to_string()),
+                    ("CARGO_PKG_VERSION_MINOR", version.minor.to_string()),
+                    ("CARGO_PKG_VERSION_PATCH", version.patch.to_string()),
+                    ("CARGO_PKG_VERSION_PRE", version.pre.to_string()),
+                    ("CARGO_PKG_AUTHORS", package.authors.join(":")),
+                    (
+                        "CARGO_PKG_DESCRIPTION",
+                        package.description.clone().unwrap_or_default(),
+                    ),
+                    (
+                        "CARGO_PKG_HOMEPAGE",
+                        package.homepage.clone().unwrap_or_default(),
+                    ),
+                    (
+                        "CARGO_PKG_REPOSITORY",
+                        package.repository.clone().unwrap_or_default(),
+                    ),
+                    (
+                        "CARGO_PKG_LICENSE",
+                        package.license.clone().unwrap_or_default(),
+                    ),
+                    (
+                        "CARGO_PKG_LICENSE_FILE",
+                        package
+                            .license_file
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .unwrap_or_default(),
+                    ),
+                    (
+                        "CARGO_PKG_README",
+                        package
+                            .readme
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .unwrap_or_default(),
+                    ),
+                    (
+                        "CARGO_PKG_RUST_VERSION",
+                        package
+                            .rust_version
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .unwrap_or_default(),
+                    ),
+                ]
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value))
+                .collect();
+                Some((relative_dir, values))
+            })
+            .collect()
+    }
+
     pub fn packages_by_name<S: AsRef<str>>(&self, names: &[S]) -> Vec<Arc<Package>> {
         names
             .iter()

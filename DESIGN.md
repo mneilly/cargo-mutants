@@ -295,3 +295,29 @@ Fully handling this seems to
 require us to reimplement some of Cargo's logic from <https://doc.rust-lang.org/cargo/reference/config.html#buildrustflags> to find the right target and config, in the right files, determine the user's flags, and then append our own.
 
 For now, cargo-mutants appends to the environment variables but does not attempt to read the config files.
+
+## Shared runtime backend
+
+`runtime.rs` builds an instrumentation plan using the existing `Mutant` spans and
+syn 2 function bodies. Whole-body alternatives avoid specialization and preserve
+ownership and evaluation order within each source mutation. Nested function
+instrumentation is emitted only in the original enclosing branch, because only
+one mutation can be active in a process.
+
+`runtime/support.rs` is a stable-Rust adaptation of mutagen's runtime selector.
+It is embedded into instrumented function bodies, avoiding target manifest
+changes and external runtime dependencies. IDs are allocated by the lab before
+workers consume the queue. The internal `CARGO_MUTANTS_ACTIVE_MUTANT` environment
+variable selects one experiment; Cargo builds and baselines explicitly select 0.
+
+`runtime/runner.rs` adapts mutagen's JSON artifact discovery and direct execution.
+It uses cargo-mutants' existing process lifecycle and result types. Nextest uses
+its own reusable binary metadata. Cargo doctests are delegated back to Cargo.
+Preparation output is separate from scenario outcomes; failed preparations split
+batches, and singleton or unsupported cases use the ordinary worker. No
+optimistic-assumption panic is interpreted as test coverage.
+
+`runtime/mutators.rs` ports additional mutagen mutation rules to syn 2 and emits
+ordinary `Mutant` values through the existing discovery visitor. Discovery and
+execution are independently selectable. Provenance and licenses are recorded in
+`third_party/mutagen/`.

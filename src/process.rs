@@ -9,6 +9,7 @@
 #![allow(clippy::redundant_else)]
 
 use std::ffi::OsStr;
+use std::fs::File;
 use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -45,6 +46,7 @@ pub struct Process {
 impl Process {
     /// Run a subprocess to completion, watching for interrupts, with a timeout, while
     /// ticking the progress bar.
+    #[allow(clippy::too_many_arguments)]
     pub fn run(
         argv: &[String],
         env: &[(String, String)],
@@ -53,8 +55,10 @@ impl Process {
         jobserver: Option<&jobserver::Client>,
         scenario_output: &mut ScenarioOutput,
         console: &Console,
+        stdout: Option<File>,
     ) -> Result<Exit> {
-        let mut child = Process::start(argv, env, cwd, timeout, jobserver, scenario_output)?;
+        let mut child =
+            Process::start(argv, env, cwd, timeout, jobserver, scenario_output, stdout)?;
         let process_status = loop {
             if let Some(exit_status) = child.poll()? {
                 break exit_status;
@@ -74,18 +78,23 @@ impl Process {
         timeout: Option<Duration>,
         jobserver: Option<&jobserver::Client>,
         scenario_output: &mut ScenarioOutput,
+        stdout: Option<File>,
     ) -> Result<Process> {
         let start = Instant::now();
         let quoted_argv = quote_argv(argv);
         scenario_output.message(&quoted_argv)?;
         debug!(%quoted_argv, "start process");
         let os_env = env.iter().map(|(k, v)| (OsStr::new(k), OsStr::new(v)));
+        let stdout = match stdout {
+            Some(file) => file,
+            None => scenario_output.open_log_append()?,
+        };
         let mut command = Command::new(&argv[0]);
         command
             .args(&argv[1..])
             .envs(os_env)
             .stdin(Stdio::null())
-            .stdout(scenario_output.open_log_append()?)
+            .stdout(stdout)
             .stderr(scenario_output.open_log_append()?)
             .current_dir(cwd);
         if let Some(js) = jobserver {

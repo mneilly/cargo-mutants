@@ -33,6 +33,7 @@ mod package;
 mod path;
 mod pretty;
 mod process;
+mod runtime;
 mod scenario;
 mod shard;
 mod source;
@@ -263,6 +264,18 @@ pub struct Args {
     /// Pass remaining arguments to cargo test after all options and after `--`.
     #[arg(last = true, help_heading = "Execution")]
     cargo_test_args: Vec<String>,
+
+    /// Compile compatible mutants together and select them at runtime (experimental).
+    #[arg(long, help_heading = "Execution", action = ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    runtime: Option<bool>,
+
+    /// Maximum mutants in one shared build.
+    #[arg(long, help_heading = "Execution", value_parser = clap::value_parser!(u32).range(1..))]
+    runtime_batch_size: Option<u32>,
+
+    /// Also generate mutagen's literal mutations and call-statement deletions.
+    #[arg(long, help_heading = "Execution", action = ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    mutagen_operators: Option<bool>,
 
     /// Cargo check generated mutants, but don't run tests.
     #[arg(long, help_heading = "Execution")]

@@ -42,6 +42,13 @@ pub struct Config {
     /// Build timeout multiplier, relative to the baseline 'cargo build'.
     pub build_timeout_multiplier: Option<f64>,
 
+    /// Compile compatible mutants together and select them at runtime (experimental).
+    pub runtime: Option<bool>,
+    /// Maximum mutants in a shared build (default 64, must be positive).
+    pub runtime_batch_size: Option<usize>,
+    /// Generate mutagen's literal mutations and call-statement deletions.
+    pub mutagen_operators: Option<bool>,
+
     /// Pass `--cap-lints` to rustc.
     pub cap_lints: bool,
     /// Copy `.git` and other VCS directories to the build directory.

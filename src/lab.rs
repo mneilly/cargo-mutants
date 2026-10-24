@@ -6,11 +6,13 @@
 #![warn(clippy::pedantic)]
 
 use std::cmp::{max, min};
+use std::collections::{BTreeMap, HashSet};
 use std::panic::resume_unwind;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use std::{thread, vec};
 
+use crate::runtime::{Experiment, RuntimePlan, runner::Invocation};
 use itertools::Itertools;
 use jiff::Timestamp;
 use tracing::{debug, debug_span, error, trace, warn};
@@ -63,6 +65,7 @@ pub fn test_mutants(
         output_mutex,
         jobserver,
         tests_for_mutant,
+        package_environment: workspace.package_environment(),
         options,
         console,
     };
@@ -92,7 +95,22 @@ pub fn test_mutants(
     // scenario to test off the queue, and then exits when there are no more left.
     console.start_testing_mutants(mutants.len());
     let n_threads = max(1, min(options.jobs.unwrap_or(1), mutants.len()));
-    let work_queue = &Mutex::new(mutants.into_iter());
+    let batch_size = if options.runtime {
+        mutants
+            .len()
+            .div_ceil(n_threads)
+            .min(options.runtime_batch_size.max(1))
+    } else {
+        1
+    };
+    let work_queue = &Mutex::new(
+        mutants
+            .into_iter()
+            .enumerate()
+            .map(|(index, mutant)| (index + 1, mutant))
+            .collect_vec()
+            .into_iter(),
+    );
     thread::scope(|scope| -> crate::Result<()> {
         let mut threads = Vec::new();
         for _i_thread in 0..n_threads {
@@ -106,7 +124,7 @@ pub fn test_mutants(
                 } else {
                     BuildDir::copy_from(workspace.root(), options, console)?
                 };
-                lab.run_queue(build_dir, timeouts, work_queue)
+                lab.run_queue(build_dir, timeouts, work_queue, batch_size)
             }));
         }
         join_threads(threads)
@@ -165,6 +183,7 @@ struct Lab<'a> {
     output_mutex: Mutex<OutputDir>,
     jobserver: Option<jobserver::Client>,
     tests_for_mutant: TestsForMutant,
+    package_environment: BTreeMap<camino::Utf8PathBuf, Vec<(String, String)>>,
     options: &'a Options,
     console: &'a Console,
 }
@@ -197,9 +216,11 @@ impl Lab<'_> {
         &self,
         build_dir: &BuildDir,
         timeouts: Timeouts,
-        work_queue: &Mutex<vec::IntoIter<Mutant>>,
+        work_queue: &Mutex<vec::IntoIter<Experiment>>,
+        batch_size: usize,
     ) -> Result<()> {
-        self.make_worker(build_dir).run_queue(work_queue, timeouts)
+        self.make_worker(build_dir)
+            .run_queue(work_queue, timeouts, batch_size)
     }
 
     fn make_worker<'a>(&'a self, build_dir: &'a BuildDir) -> Worker<'a> {
@@ -208,6 +229,7 @@ impl Lab<'_> {
             output_mutex: &self.output_mutex,
             jobserver: self.jobserver.as_ref(),
             tests_for_mutant: &self.tests_for_mutant,
+            package_environment: &self.package_environment,
             options: self.options,
             console: self.console,
         }
@@ -223,34 +245,187 @@ struct Worker<'a> {
     output_mutex: &'a Mutex<OutputDir>,
     jobserver: Option<&'a jobserver::Client>,
     tests_for_mutant: &'a TestsForMutant,
+    package_environment: &'a BTreeMap<camino::Utf8PathBuf, Vec<(String, String)>>,
     options: &'a Options,
     console: &'a Console,
 }
 
 impl Worker<'_> {
-    /// Run until the input queue is empty.
+    /// Take disjoint batches from the queue; each worker owns its build directory.
     fn run_queue(
         mut self,
-        work_queue: &Mutex<vec::IntoIter<Mutant>>,
+        work_queue: &Mutex<vec::IntoIter<Experiment>>,
         timeouts: Timeouts,
+        batch_size: usize,
     ) -> Result<()> {
         let _span = debug_span!("worker thread", build_dir = ?self.build_dir.path()).entered();
         loop {
-            // Not a `for` statement so that we don't hold the lock
-            // for the whole iteration.
-            let Some(mutant) = work_queue.lock().expect("Lock pending work queue").next() else {
+            let batch = work_queue
+                .lock()
+                .expect("Lock pending work queue")
+                .by_ref()
+                .take(batch_size)
+                .collect_vec();
+            if batch.is_empty() {
                 return Ok(());
-            };
-            let _span = debug_span!("mutant", name = mutant.name(false)).entered();
-            let test_packages = match self.tests_for_mutant {
-                TestsForMutant::Workspace => PackageSelection::All,
-                TestsForMutant::Mutated => {
-                    PackageSelection::Explicit(vec![mutant.source_file.package.clone()])
+            }
+            // The default test selection is per mutated package. Build separate
+            // groups so a shared build never silently broadens that selection.
+            let mut groups = BTreeMap::<String, Vec<Experiment>>::new();
+            for experiment in batch {
+                let key = if *self.tests_for_mutant == TestsForMutant::Mutated {
+                    experiment.1.source_file.package.version_qualified_name()
+                } else {
+                    String::new()
+                };
+                groups.entry(key).or_default().push(experiment);
+            }
+            for group in groups.into_values() {
+                self.run_runtime_batch(group, timeouts)?;
+            }
+        }
+    }
+
+    fn test_packages(&self, mutant: &Mutant) -> PackageSelection {
+        match self.tests_for_mutant {
+            TestsForMutant::Workspace => PackageSelection::All,
+            TestsForMutant::Mutated => {
+                PackageSelection::Explicit(vec![mutant.source_file.package.clone()])
+            }
+            TestsForMutant::Explicit(packages) => PackageSelection::Explicit(packages.clone()),
+        }
+    }
+
+    /// Failed preparations are never recorded as mutant outcomes. Split to
+    /// isolate incompatible alternatives; singleton failures use the original
+    /// runner, which distinguishes compile errors from caught mutations.
+    fn run_runtime_batch(
+        &mut self,
+        experiments: Vec<Experiment>,
+        timeouts: Timeouts,
+    ) -> Result<()> {
+        let test_packages = self.test_packages(&experiments[0].1);
+        let invocation = self
+            .options
+            .runtime
+            .then(|| Invocation::new(&test_packages, self.options))
+            .flatten();
+        let Some(invocation) = invocation else {
+            for (_, mutant) in experiments {
+                self.run_one_scenario(&Scenario::Mutant(mutant), &test_packages, timeouts)?;
+            }
+            return Ok(());
+        };
+        let plan = RuntimePlan::new(&experiments)?;
+        let ids: HashSet<_> = plan.experiments.iter().map(|(id, _)| *id).collect();
+        let (supported, unsupported): (Vec<_>, Vec<_>) = experiments
+            .into_iter()
+            .partition(|(id, _)| ids.contains(id));
+        if !supported.is_empty() {
+            plan.install(self.build_dir)?;
+            let result = self.try_runtime_batch(&plan, invocation, &test_packages, timeouts);
+            plan.restore(self.build_dir)?;
+            if !result? {
+                if supported.len() == 1 {
+                    let (_, mutant) = supported.into_iter().next().unwrap();
+                    self.run_one_scenario(&Scenario::Mutant(mutant), &test_packages, timeouts)?;
+                } else {
+                    let mut left = supported;
+                    let right = left.split_off(left.len() / 2);
+                    self.run_runtime_batch(left, timeouts)?;
+                    self.run_runtime_batch(right, timeouts)?;
                 }
-                TestsForMutant::Explicit(packages) => PackageSelection::Explicit(packages.clone()),
-            };
+            }
+        }
+        for (_, mutant) in unsupported {
             self.run_one_scenario(&Scenario::Mutant(mutant), &test_packages, timeouts)?;
         }
+        Ok(())
+    }
+
+    fn try_runtime_batch(
+        &mut self,
+        plan: &RuntimePlan,
+        invocation: Invocation,
+        test_packages: &PackageSelection,
+        timeouts: Timeouts,
+    ) -> Result<bool> {
+        let mut preparation = self
+            .output_mutex
+            .lock()
+            .expect("lock runtime preparation")
+            .start_runtime_build()?;
+        debug!(count = plan.experiments.len(), log = %preparation.log_path(), "prepare runtime batch");
+        let Some(compiled) = invocation.compile(
+            self.build_dir,
+            self.jobserver,
+            test_packages,
+            timeouts.build,
+            &mut preparation,
+            self.options,
+            self.console,
+            self.package_environment,
+        )?
+        else {
+            debug!("Shared build failed; split batch or fall back to individual build");
+            return Ok(false);
+        };
+        if self.options.baseline == BaselineStrategy::Run {
+            match compiled.run(
+                0,
+                self.build_dir,
+                self.jobserver,
+                timeouts.test,
+                &mut preparation,
+                self.options,
+                self.console,
+            ) {
+                Ok(result) if result.is_success() => {}
+                result => {
+                    crate::interrupt::check_interrupted()?;
+                    preparation.message(&format!(
+                        "Inactive instrumented tests failed: {result:?}; falling back"
+                    ))?;
+                    return Ok(false);
+                }
+            }
+        }
+        for (id, mutant) in &plan.experiments {
+            let scenario = Scenario::Mutant(mutant.clone());
+            let mut output = self
+                .output_mutex
+                .lock()
+                .expect("lock runtime scenario")
+                .start_scenario(&scenario)?;
+            let dir = self.build_dir.path();
+            self.console
+                .scenario_started(dir, &scenario, output.open_log_read()?);
+            output.write_diff(&mutant.diff(&mutant.mutated_code()))?;
+            output.message(&format!(
+                "Runtime mutation {id}; shared build: {}",
+                preparation.log_path()
+            ))?;
+            let mut outcome = ScenarioOutcome::new(&output, scenario.clone());
+            self.console.scenario_phase_started(dir, Phase::Test);
+            let result = compiled.run(
+                *id,
+                self.build_dir,
+                self.jobserver,
+                timeouts.test,
+                &mut output,
+                self.options,
+                self.console,
+            )?;
+            outcome.add_phase_result(result);
+            self.console.scenario_phase_finished(dir, Phase::Test);
+            self.output_mutex
+                .lock()
+                .expect("record runtime outcome")
+                .add_scenario_outcome(&outcome)?;
+            self.console
+                .scenario_finished(dir, &scenario, &outcome, self.options);
+        }
+        Ok(true)
     }
 
     fn run_one_scenario(

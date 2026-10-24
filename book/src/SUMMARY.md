@@ -21,6 +21,7 @@
   - [Passing options to Cargo](cargo-args.md)
   - [Copying the tree](build-dirs.md)
   - [Using nextest](nextest.md)
+  - [Shared runtime builds](runtime.md)
   - [Baseline tests](baseline.md)
   - [Testing in-place](in-place.md)
   - [Iterating on missed mutants](iterate.md)

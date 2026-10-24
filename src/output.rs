@@ -168,6 +168,16 @@ impl OutputDir {
         })
     }
 
+    /// Log preparation separately from mutant and baseline outcomes.
+    pub fn start_runtime_build(&mut self) -> Result<ScenarioOutput> {
+        let index = self.used_log_names.entry("runtime".to_owned()).or_default();
+        let basename = format!("runtime_{index:03}");
+        *index += 1;
+        let mut output = ScenarioOutput::new(&self.path, &Scenario::Baseline, &basename)?;
+        output.message("Preparing shared runtime build")?;
+        Ok(output)
+    }
+
     /// Allocate a sequence number and the output files for a scenario.
     pub fn start_scenario(&mut self, scenario: &Scenario) -> Result<ScenarioOutput> {
         let scenario_name = match scenario {
@@ -321,6 +331,21 @@ impl ScenarioOutput {
 
     pub fn log_path(&self) -> &Utf8Path {
         &self.log_path
+    }
+
+    /// Keep machine-readable compiler stdout separate from concurrent diagnostics.
+    pub fn stdout_path(&self) -> Utf8PathBuf {
+        self.output_dir
+            .join(&self.log_path)
+            .with_extension("stdout")
+    }
+
+    pub fn open_stdout(&self) -> Result<File> {
+        File::options()
+            .create_new(true)
+            .write(true)
+            .open(self.stdout_path())
+            .context("create compiler stdout capture")
     }
 
     pub fn write_diff(&mut self, diff: &str) -> Result<()> {

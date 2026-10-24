@@ -9,6 +9,12 @@ will also make normal development more pleasant.
 
 <https://matklad.github.io/2021/09/04/fast-rust-builds.html> has good general advice on making Rust builds and tests faster.
 
+## Shared runtime builds
+
+The experimental [`--runtime` backend](runtime.md) compiles compatible mutations
+together and selects one per test process. It can reduce compilation work, with
+automatic fallback for incompatible alternatives.
+
 ## Avoid doctests
 
 Rust doctests are pretty slow, because every doctest example becomes a separate

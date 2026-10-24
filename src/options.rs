@@ -13,7 +13,7 @@ use std::env;
 use std::ffi::OsString;
 use std::time::Duration;
 
-use anyhow::Context;
+use anyhow::{Context, ensure};
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::ArgAction;
 use globset::GlobSet;
@@ -46,6 +46,14 @@ pub struct Options {
 
     /// Don't run the tests, just see if each mutant builds.
     pub check_only: bool,
+
+    /// Use shared instrumented builds when possible.
+    pub runtime: bool,
+
+    pub runtime_batch_size: usize,
+
+    /// Add mutagen's literal and call-statement mutation operators.
+    pub mutagen_operators: bool,
 
     /// Copy `.git` and other VCS directories to build directories.
     pub copy_vcs: bool,
@@ -342,6 +350,16 @@ impl Options {
                 .or(config.build_timeout_multiplier),
             cap_lints: args.cap_lints.unwrap_or(config.cap_lints),
             check_only: args.check,
+            runtime: args.runtime.or(config.runtime).unwrap_or(false),
+            runtime_batch_size: args
+                .runtime_batch_size
+                .map(|size| size as usize)
+                .or(config.runtime_batch_size)
+                .unwrap_or(64),
+            mutagen_operators: args
+                .mutagen_operators
+                .or(config.mutagen_operators)
+                .unwrap_or(false),
             colors: args.colors,
             copy_vcs: args.copy_vcs.or(config.copy_vcs).unwrap_or(false),
             emit_json: args.json,
@@ -385,6 +403,14 @@ impl Options {
             test_timeout: args.timeout.map(Duration::from_secs_f64),
             test_timeout_multiplier: args.timeout_multiplier.or(config.timeout_multiplier),
         };
+        ensure!(
+            !options.runtime || !options.in_place,
+            "--runtime requires a scratch copy and cannot be used with --in-place"
+        );
+        ensure!(
+            options.runtime_batch_size > 0,
+            "runtime_batch_size must be positive"
+        );
         if let Some(jobs) = options.jobs
             && jobs > 8
         {

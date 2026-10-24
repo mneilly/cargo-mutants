@@ -25,6 +25,10 @@ pub enum Genre {
     FnValue,
     /// Replace `==` with `!=` and so on.
     BinaryOperator,
+    /// Replace a literal using mutagen's rules.
+    Literal,
+    /// Delete a semicolon-terminated function or method call.
+    CallStatement,
     UnaryOperator,
     /// Delete match arm.
     MatchArm,

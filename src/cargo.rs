@@ -6,6 +6,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 use std::env;
+use std::fs::File;
 use std::iter::once;
 use std::time::{Duration, Instant};
 
@@ -41,9 +42,36 @@ pub fn run_cargo(
     options: &Options,
     console: &Console,
 ) -> Result<PhaseResult> {
+    run_cargo_command(
+        build_dir,
+        jobserver,
+        cargo_argv(packages, phase, options),
+        phase,
+        timeout,
+        scenario_output,
+        options,
+        console,
+        0,
+        None,
+    )
+}
+
+/// Run a prepared Cargo command, including shared-build preparation and doctests.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_cargo_command(
+    build_dir: &BuildDir,
+    jobserver: Option<&jobserver::Client>,
+    argv: Vec<String>,
+    phase: Phase,
+    timeout: Option<Duration>,
+    scenario_output: &mut ScenarioOutput,
+    options: &Options,
+    console: &Console,
+    active_mutant: usize,
+    stdout: Option<File>,
+) -> Result<PhaseResult> {
     let _span = debug_span!("run", ?phase).entered();
     let start = Instant::now();
-    let argv = cargo_argv(packages, phase, options);
     let mut env = vec![
         // The tests might use Insta <https://insta.rs>, and we don't want it to write
         // updates to the source tree, and we *certainly* don't want it to write
@@ -51,6 +79,10 @@ pub fn run_cargo(
         ("INSTA_UPDATE".to_owned(), "no".to_owned()),
         ("INSTA_FORCE_PASS".to_owned(), "0".to_owned()),
     ];
+    env.push((
+        crate::runtime::SELECTOR_ENV.to_owned(),
+        active_mutant.to_string(),
+    ));
     if let Some(encoded_rustflags) = encoded_rustflags(options) {
         debug!(?encoded_rustflags);
         env.push(("CARGO_ENCODED_RUSTFLAGS".to_owned(), encoded_rustflags));
@@ -63,6 +95,7 @@ pub fn run_cargo(
         jobserver,
         scenario_output,
         console,
+        stdout,
     )?;
     check_interrupted()?;
     debug!(?process_status, elapsed = ?start.elapsed());
@@ -93,7 +126,11 @@ pub fn cargo_bin() -> String {
 /// Make up the argv for a cargo check/build/test invocation, including argv[0] as the
 /// cargo binary itself.
 // (This is split out so it's easier to test.)
-fn cargo_argv(packages: &PackageSelection, phase: Phase, options: &Options) -> Vec<String> {
+pub(crate) fn cargo_argv(
+    packages: &PackageSelection,
+    phase: Phase,
+    options: &Options,
+) -> Vec<String> {
     let mut cargo_args = vec![cargo_bin()];
     match phase {
         Phase::Test => match &options.test_tool() {

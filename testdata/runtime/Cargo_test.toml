@@ -1,0 +1,10 @@
+[package]
+name = "cargo-mutants-testdata-runtime"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Exercises shared mutation builds, nested functions, generics with missing
+# alternate operator traits, const fallback, and the additional mutagen operators.
+[lib]
+doctest = false

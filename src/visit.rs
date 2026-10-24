@@ -554,6 +554,42 @@ impl<'ast> Visit<'ast> for DiscoveryVisitor<'_> {
         });
     }
 
+    fn visit_expr_lit(&mut self, i: &'ast syn::ExprLit) {
+        if attrs_excluded(&i.attrs) {
+            return;
+        }
+        self.in_exclude_re_scope(&i.attrs, |v| {
+            if v.options.mutagen_operators && !v.fn_stack.is_empty() {
+                for replacement in crate::runtime::mutators::literal_replacements(&i.lit) {
+                    v.collect_mutant(i.lit.span().into(), None, &replacement, Genre::Literal);
+                }
+            }
+            syn::visit::visit_expr_lit(v, i);
+        });
+    }
+
+    fn visit_stmt(&mut self, i: &'ast syn::Stmt) {
+        if self.options.mutagen_operators && crate::runtime::mutators::is_call_statement(i) {
+            let syn::Stmt::Expr(expr, _) = i else {
+                unreachable!()
+            };
+            let attrs = match expr {
+                syn::Expr::Call(call) => &call.attrs,
+                syn::Expr::MethodCall(call) => &call.attrs,
+                _ => unreachable!(),
+            };
+            if attrs_excluded(attrs) {
+                return;
+            }
+            self.in_exclude_re_scope(attrs, |v| {
+                if !v.fn_stack.is_empty() {
+                    v.collect_mutant(i.span().into(), None, &quote!(), Genre::CallStatement);
+                }
+            });
+        }
+        syn::visit::visit_stmt(self, i);
+    }
+
     /// Visit top-level `fn foo()`.
     fn visit_item_fn(&mut self, i: &'ast ItemFn) {
         let function_name = i.sig.ident.to_pretty_string();
