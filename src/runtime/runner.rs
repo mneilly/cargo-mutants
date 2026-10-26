@@ -411,7 +411,7 @@ impl CompiledTests {
 fn has_custom_harness(artifact: &Artifact) -> Result<bool> {
     let text =
         std::fs::read_to_string(&artifact.manifest_path).context("read test target manifest")?;
-    let manifest: toml::Value = text.parse().context("parse test target manifest")?;
+    let manifest: toml::Table = text.parse().context("parse test target manifest")?;
     for kind in &artifact.target.kind {
         let key = match kind {
             TargetKind::Bin => "bin",
@@ -465,5 +465,38 @@ mod test {
             };
             assert!(Invocation::new(&PackageSelection::All, &options).is_none());
         }
+    }
+
+    fn artifact_for(dir: &tempfile::TempDir, manifest: &str, kind: &str, name: &str) -> Artifact {
+        let manifest_path = dir.path().join("Cargo.toml");
+        std::fs::write(&manifest_path, manifest).unwrap();
+        let json = serde_json::json!({
+            "reason": "compiler-artifact",
+            "package_id": "p 0.1.0 (path+file:///p)",
+            "manifest_path": manifest_path,
+            "target": {
+                "name": name, "kind": [kind], "crate_types": [kind],
+                "required-features": [], "src_path": "/p/src/main.rs",
+                "edition": "2021", "doctest": false, "test": true, "doc": false
+            },
+            "profile": {
+                "opt_level": "0", "debuginfo": 0, "debug_assertions": true,
+                "overflow_checks": true, "test": true
+            },
+            "features": [], "filenames": [], "executable": null, "fresh": false
+        });
+        match serde_json::from_value::<Message>(json).unwrap() {
+            Message::CompilerArtifact(artifact) => artifact,
+            other => panic!("unexpected message {other:?}"),
+        }
+    }
+
+    #[test]
+    fn has_custom_harness_parses_full_manifest_document() {
+        let manifest = "[package]\nname = \"p\"\nversion = \"0.1.0\"\n\n[[bin]]\nname = \"p\"\nharness = false\n";
+        let dir = tempfile::tempdir().unwrap();
+        assert!(has_custom_harness(&artifact_for(&dir, manifest, "bin", "p")).unwrap());
+        let manifest = "[package]\nname = \"p\"\nversion = \"0.1.0\"\n";
+        assert!(!has_custom_harness(&artifact_for(&dir, manifest, "bin", "p")).unwrap());
     }
 }
